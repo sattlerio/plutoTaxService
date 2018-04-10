@@ -25,15 +25,21 @@ class TaxRule(db.Model):
     __tablename__ = "accounting_tax_rules"
 
     id = db.Column(db.Integer, primary_key=True)
+
+    tax_rule_name = db.Column(db.String(250), nullable=False)
     tax_rule_uuid = db.Column(db.String(250), unique=True, nullable=False)
 
     tax_id = db.Column(db.Integer, db.ForeignKey("accounting_taxes.id"), nullable=False)
+
+    value = db.Column(db.Numeric, nullable=False, default=0.00)
 
     b2c_rule = db.Column(db.Boolean, default=False, nullable=False)
 
     countries = db.relationship("TaxRuleCountry", backref="accounting_tax_rules", cascade='delete,all', lazy=True)
 
-    def __init__(self, tax_id, b2c_rule=False):
+    def __init__(self, tax_id, value, tax_rule_name, b2c_rule=False):
+        self.value = value
+        self.tax_rule_name = tax_rule_name
         self.tax_id = tax_id
         self.tax_rule_uuid = uuid.uuid4().hex
         self.b2c_rule = b2c_rule

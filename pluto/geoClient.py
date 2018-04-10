@@ -6,14 +6,13 @@ import requests
 
 class GeoServiceClient:
     geo_service_url = ""
-    countries = []
 
     def __init__(self, host: str):
         self.geo_service_url = "{}".format(host)
 
     def validate_countries(self, country_list):
+        countries = []
         r = requests.get(self.geo_service_url)
-        app.logger.debug(r.text)
 
         if not r.json():
             return False
@@ -22,7 +21,8 @@ class GeoServiceClient:
 
         for country in geo_countries:
             if country["id"] in country_list:
-                self.countries.append(country["id"])
+                countries.append(country["id"])
 
-        return self.countries
+        r.close()
+        return countries
 

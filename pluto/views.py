@@ -146,6 +146,132 @@ def fetch_tax_by_id(tax_id, company_id):
     )
 
 
+@pluto.route("/rule/configuration/data/<tax_id>/<company_id>")
+def fetch_tax_configuration(tax_id, company_id):
+    transaction_id = request.headers.get("x-transactionid", "")
+    if not transaction_id:
+        app.logger.info("no transaction id header present")
+        transaction_id = str(uuid.uuid4())
+
+    app.logger.info(f"{transaction_id}: got new transaction to fetch all taxes")
+
+    if "x-user-id" not in request.headers or "x-user-uuid" not in request.headers:
+        app.logger.info(f"{transaction_id}: user id and user uuid header not present")
+        return jsonify(
+            status="ERROR",
+            message="please send your user as header",
+            request_id=transaction_id,
+            status_code=400
+        ), 400
+
+    user_uuid = request.headers.get("x-user-uuid")
+
+    validation = _validate_request(user_uuid, company_id, transaction_id)
+    if validation:
+        return validation
+
+    tax = Tax.query.filter_by(tax_uuid=tax_id).filter_by(company_id=company_id).first_or_404()
+
+    tax_groups = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=False).all()
+    b2c_tax_groups = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=True).all()
+
+    b2c_without_countries = count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=True).filter(~TaxRule.countries.any()).count()
+    rules_without_countries = count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=False).filter(~TaxRule.countries.any()).count()
+
+    forbidden_regular_countries = []
+    for rule in tax_groups:
+        for country in rule.countries:
+            forbidden_regular_countries.append(country.country_id)
+
+    forbidden_b2c_countries = []
+    for rule in b2c_tax_groups:
+        for country in rule.countries:
+            forbidden_b2c_countries.append(country.country_id)
+
+    data = {
+        'name': tax.name,
+        'b2c_without_countries': b2c_without_countries,
+        'rules_without_countries': rules_without_countries,
+        'default_rate': int(tax.default_tax),
+        'default_rate_read': f"{tax.default_tax}%",
+        'tax_id': tax.tax_uuid
+    }
+
+    return jsonify(
+        status="OK",
+        message="successfully fetched tax",
+        tax=data,
+        used_regular_countries=forbidden_regular_countries,
+        used_b2c_countries=forbidden_b2c_countries,
+        status_code=200,
+        transaction_id=transaction_id
+    )
+
+
+@pluto.route("/rules/<tax_id>/<company_id>")
+def fetch_tax_rules(tax_id, company_id):
+    transaction_id = request.headers.get("x-transactionid", "")
+    if not transaction_id:
+        app.logger.info("no transaction id header present")
+        transaction_id = str(uuid.uuid4())
+
+    app.logger.info(f"{transaction_id}: got new transaction to fetch tax per id  with rules")
+
+    if "x-user-id" not in request.headers or "x-user-uuid" not in request.headers:
+        app.logger.info(f"{transaction_id}: user id and user uuid header not present")
+        return jsonify(
+            status="ERROR",
+            message="please send your user as header",
+            request_id=transaction_id,
+            status_code=400
+        ), 400
+
+    user_uuid = request.headers.get("x-user-uuid")
+
+    validation = _validate_request(user_uuid, company_id, transaction_id)
+    if validation:
+        return validation
+
+    tax = Tax.query.filter_by(tax_uuid=tax_id).filter_by(company_id=company_id).first_or_404()
+    tax_data = {
+        'name': tax.name,
+        'default_rate': int(tax.default_tax),
+        'default_rate_read': f"{tax.default_tax}%",
+        'rules': len(tax.tax_rules),
+        'tax_id': tax.tax_uuid
+    }
+
+    data_b2c = []
+    data = []
+    for rule in tax.tax_rules:
+        countries = []
+        for country in rule.countries:
+            countries.append(country.country_id)
+        if rule.b2c_rule:
+            data_b2c.append({
+                'rule_id': rule.tax_rule_uuid,
+                'b2c_rule': rule.b2c_rule,
+                'rule': float(rule.value)
+            })
+        else:
+            data.append({
+                'rule_id': rule.tax_rule_uuid,
+                'b2c_rule': rule.b2c_rule,
+                'rule': float(rule.value)
+            })
+
+    tax_data["data"] = data
+    tax_data["data_b2c"] = data_b2c
+
+    return jsonify(
+        status="OK",
+        message="successfully fetched tax",
+        data=tax_data,
+        status_code=200,
+        transaction_id=transaction_id
+    )
+
+
 @pluto.route("/<tax_id>/create/rule/<company_id>", methods=["POST"])
 def add_rule_to_tax(tax_id, company_id):
     transaction_id = request.headers.get("x-transactionid", "")
@@ -182,16 +308,6 @@ def add_rule_to_tax(tax_id, company_id):
             status_code=400
         ), 400
 
-    post_data = request.json
-    if not post_data or "countries" not in post_data:
-        app.logger.info("countries not present in post data")
-        return jsonify(
-            status="ERROR",
-            message="please submit valid POST body",
-            request_id=transaction_id,
-            status_code=400
-        ), 400
-
     tax = Tax.query.filter_by(tax_uuid=tax_id)
     if tax.count() != 1:
         return jsonify(
@@ -202,48 +318,96 @@ def add_rule_to_tax(tax_id, company_id):
         ), 404
     tax = tax.first()
 
-    countries = post_data["countries"]
-    if not isinstance(countries, list):
+    post_data = request.json
+
+    if not post_data or "rule_name" not in post_data or "value" not in post_data or "b2c_rule" not in post_data:
+        app.logger.info("not a valid post request because of missing data")
         return jsonify(
             status="ERROR",
-            message="please submit a valid post body",
+            message="please submit valid POST body",
             request_id=transaction_id,
             status_code=400
         ), 400
 
-    geo_client = GeoServiceClient(app.config.get("GEOSERVICE"))
-    validated_countries = geo_client.validate_countries(countries)
-
-    if not validated_countries:
-        return jsonify(
-            status="ERROR",
-            message="the submitted data is not valid",
-            request_id=transaction_id,
-            status_code=400
-        ), 400
-
-    if "b2c" in post_data:
-        if post_data["b2c"]:
-            b2c =  True
-        else:
-            b2c = False
+    countries = []
+    if post_data["b2c_rule"]:
+        b2c = True
+        app.logger.info("request is for b2c")
+        if "b2c_countries" in post_data:
+            countries = post_data["b2c_countries"]
     else:
         b2c = False
+        app.logger.info("request is for non b2c ")
+        if "countries" in post_data:
+            countries = post_data["countries"]
 
-    tax_rule = TaxRule(tax.id, b2c)
+    if countries:
+        if not isinstance(countries, list):
+            return jsonify(
+                status="ERROR",
+                message="please submit a valid post body",
+                request_id=transaction_id,
+                status_code=400
+            ), 400
 
-    for country in validated_countries:
-        tax_rule.countries.append(TaxRuleCountry(country_id=country))
+        geo_client = GeoServiceClient(app.config.get("GEOSERVICE"))
+        validated_countries = geo_client.validate_countries(countries)
 
-    db.session.add(tax_rule)
-    db.session.commit()
+        if not validated_countries:
+            return jsonify(
+                status="ERROR",
+                message="the submitted data is not valid",
+                request_id=transaction_id,
+                status_code=400
+            ), 400
 
-    return jsonify(
-        status="OK",
-        status_code=200,
-        message="created tax rule",
-        request_id=transaction_id
-    ), 200
+        tax_rule = TaxRule(tax.id, post_data["value"], post_data["rule_name"], b2c)
+        db.session.add(tax_rule)
+
+        for country in validated_countries:
+            count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=b2c).filter(TaxRule.countries.any(country_id=country)).count()
+            if count == 0:
+                trc = TaxRuleCountry(country)
+                tax_rule.countries.append(trc)
+            else:
+                return jsonify(
+                    status="ERROR",
+                    status_code=400,
+                    error_code=8000,
+                    message="one of the country exists aleady with this settings",
+                    country_id=country
+                ), 400
+
+        db.session.commit()
+        return jsonify(
+            status="OK",
+            status_code=200,
+            message="created tax rule",
+            request_id=transaction_id
+        ), 200
+
+    else:
+        count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=b2c).filter(~TaxRule.countries.any()).count()
+
+        if count == 0:
+            app.logger.info(f"no other rule with b2c={b2c} for tax {tax.id} - going to save")
+            tax_rule = TaxRule(tax.id, post_data["value"], post_data["rule_name"], b2c)
+            db.session.add(tax_rule)
+            db.session.commit()
+            return jsonify(
+                status="OK",
+                status_code=200,
+                message="created tax rule",
+                request_id=transaction_id
+            ), 200
+        else:
+            app.logger.info("there is already a rule")
+            return jsonify(
+                status="ERROR",
+                status_code=400,
+                error_code=9000,
+                request_id=transaction_id
+            ), 400
 
 
 @pluto.route('/delete/<tax_id>/<company_id>', methods=['DELETE'])
