@@ -61,6 +61,81 @@ def _validate_request(user_uuid, company_id, transaction_id):
         ), 500
 
 
+@pluto.route("/test/<tax_id>/<company_id>", methods=["POST"])
+def test_tax_configuration(tax_id, company_id):
+    transaction_id = request.headers.get("x-transactionid", "")
+    if not transaction_id:
+        app.logger.info("no transaction id header present")
+        transaction_id = str(uuid.uuid4())
+
+    app.logger.info(f"{transaction_id}: got new transaction to fetch all taxes")
+
+    if "x-user-id" not in request.headers or "x-user-uuid" not in request.headers:
+        app.logger.info(f"{transaction_id}: user id and user uuid header not present")
+        return jsonify(
+            status="ERROR",
+            message="please send your user as header",
+            request_id=transaction_id,
+            status_code=400
+        ), 400
+
+    user_uuid = request.headers.get("x-user-uuid")
+
+    validation = _validate_request(user_uuid, company_id, transaction_id)
+    if validation:
+        return validation
+
+    tax = Tax.query.filter_by(tax_uuid=tax_id).first_or_404()
+
+    if not request.is_json and not request.json:
+        app.logger.info(f"{transaction_id}: no json data submitted")
+        return jsonify(
+            status="ERROR",
+            message="you have to submit a valid post json body",
+            request_id=transaction_id,
+            status_code=400
+        ), 400
+
+    post_data = request.json
+
+    if not post_data or "tax_option" not in post_data or "country" not in post_data:
+        app.logger.info("not a valid post request because of missing data")
+        return jsonify(
+            status="ERROR",
+            message="please submit valid POST body",
+            request_id=transaction_id,
+            status_code=400
+        ), 400
+
+    if post_data["tax_option"] == "b2c":
+        b2c = True
+    else:
+        b2c =False
+
+    tax_value = tax.default_tax
+    tax_name = ""
+
+    if len(tax.tax_rules) >= 1:
+        tx = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=b2c).join(TaxRuleCountry).filter(TaxRuleCountry.country_id==post_data["country"])
+        tx2 = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=b2c).filter(~TaxRule.countries.any())
+        if tx.count() == 1:
+            rate = tx.first()
+            tax_value = rate.value
+            tax_name = rate.tax_rule_name
+        elif tx2.count() == 1:
+            rate = tx2.first()
+            tax_value = rate.value
+            tax_name = rate.tax_rule_name
+
+    return jsonify(
+        status="OK",
+        status_code=200,
+        tax_rate=float(tax_value),
+        tax=tax_name,
+        request_id=transaction_id
+    ), 200
+
+
 @pluto.route("/all/<company_id>")
 def fetch_all_taxes(company_id):
     transaction_id = request.headers.get("x-transactionid", "")
@@ -400,7 +475,8 @@ def add_rule_to_tax(tax_id, company_id):
         ), 404
     tax = tax.first()
 
-    given_tax_rule = TaxRule.query.filter_by(tax_id=tax.id).filter_by(tax_rule_uuid=arg_tax_rule_id).first_or_404()
+    if request.method == "PUT":
+        given_tax_rule = TaxRule.query.filter_by(tax_id=tax.id).filter_by(tax_rule_uuid=arg_tax_rule_id).first_or_404()
 
     post_data = request.json
 
