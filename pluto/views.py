@@ -149,6 +149,9 @@ def fetch_tax_by_id(tax_id, company_id):
 @pluto.route("/rule/configuration/data/<tax_id>/<company_id>")
 def fetch_tax_configuration(tax_id, company_id):
     transaction_id = request.headers.get("x-transactionid", "")
+
+    arg_tax_rule_id = request.args.get("tax_rule_id", False)
+
     if not transaction_id:
         app.logger.info("no transaction id header present")
         transaction_id = str(uuid.uuid4())
@@ -172,11 +175,20 @@ def fetch_tax_configuration(tax_id, company_id):
 
     tax = Tax.query.filter_by(tax_uuid=tax_id).filter_by(company_id=company_id).first_or_404()
 
-    tax_groups = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=False).all()
-    b2c_tax_groups = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=True).all()
+    if arg_tax_rule_id:
+        tax_groups = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=False).filter(TaxRule.tax_rule_uuid != arg_tax_rule_id).all()
+        b2c_tax_groups = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=True).filter(TaxRule.tax_rule_uuid != arg_tax_rule_id).all()
 
-    b2c_without_countries = count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=True).filter(~TaxRule.countries.any()).count()
-    rules_without_countries = count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=False).filter(~TaxRule.countries.any()).count()
+        b2c_without_countries = count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=True).filter(TaxRule.tax_rule_uuid != arg_tax_rule_id).filter(~TaxRule.countries.any()).count()
+        rules_without_countries = count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=False).filter(TaxRule.tax_rule_uuid != arg_tax_rule_id).filter(~TaxRule.countries.any()).count()
+    else:
+        tax_groups = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=False).all()
+        b2c_tax_groups = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=True).all()
+
+        b2c_without_countries = count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=True).filter(
+            ~TaxRule.countries.any()).count()
+        rules_without_countries = count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=False).filter(
+            ~TaxRule.countries.any()).count()
 
     forbidden_regular_countries = []
     for rule in tax_groups:
@@ -250,14 +262,20 @@ def fetch_tax_rules(tax_id, company_id):
         if rule.b2c_rule:
             data_b2c.append({
                 'rule_id': rule.tax_rule_uuid,
+                'name': rule.tax_rule_name,
                 'b2c_rule': rule.b2c_rule,
-                'rule': float(rule.value)
+                'rule': float(rule.value),
+                'human_rule': "{}%".format(rule.value),
+                'countries': countries
             })
         else:
             data.append({
                 'rule_id': rule.tax_rule_uuid,
+                'name': rule.tax_rule_name,
                 'b2c_rule': rule.b2c_rule,
-                'rule': float(rule.value)
+                'rule': float(rule.value),
+                'human_rule': "{}%".format(rule.value),
+                'countries': countries
             })
 
     tax_data["data"] = data
@@ -272,7 +290,62 @@ def fetch_tax_rules(tax_id, company_id):
     )
 
 
-@pluto.route("/<tax_id>/create/rule/<company_id>", methods=["POST"])
+@pluto.route("/rule/<tax_rule_id>/<tax_id>/<company_id>")
+def fetch_tax_rule_by_id(tax_rule_id, tax_id, company_id):
+    transaction_id = request.headers.get("x-transactionid", "")
+    if not transaction_id:
+        app.logger.info("no transaction id header present")
+        transaction_id = str(uuid.uuid4())
+
+    app.logger.info(f"{transaction_id}: got new transaction to fetch tax per id  with rules")
+
+    if "x-user-id" not in request.headers or "x-user-uuid" not in request.headers:
+        app.logger.info(f"{transaction_id}: user id and user uuid header not present")
+        return jsonify(
+            status="ERROR",
+            message="please send your user as header",
+            request_id=transaction_id,
+            status_code=400
+        ), 400
+
+    user_uuid = request.headers.get("x-user-uuid")
+
+    validation = _validate_request(user_uuid, company_id, transaction_id)
+    if validation:
+        return validation
+
+    tax = Tax.query.filter_by(tax_uuid=tax_id).filter_by(company_id=company_id).first_or_404()
+    tax_rule = TaxRule.query.filter_by(tax_id=tax.id).filter_by(tax_rule_uuid=tax_rule_id).first_or_404()
+
+    data = {
+        "tax_rule_name": tax_rule.tax_rule_name,
+        "tax_rule_uuid": tax_rule.tax_rule_uuid,
+        "value": float(tax_rule.value),
+        "b2c_rule": tax_rule.b2c_rule
+    }
+
+    countries = []
+    for country in tax_rule.countries:
+        countries.append(country.country_id)
+
+    data = {
+        "tax_rule_name": tax_rule.tax_rule_name,
+        "tax_rule_uuid": tax_rule.tax_rule_uuid,
+        "value": float(tax_rule.value),
+        "b2c_rule": tax_rule.b2c_rule,
+        "countries": countries
+    }
+
+    return jsonify(
+        status="OK",
+        message="successfully fetched tax",
+        data=data,
+        status_code=200,
+        transaction_id=transaction_id
+    )
+
+
+@pluto.route("/<tax_id>/create/rule/<company_id>", methods=["POST", "PUT"])
 def add_rule_to_tax(tax_id, company_id):
     transaction_id = request.headers.get("x-transactionid", "")
     if not transaction_id:
@@ -280,6 +353,15 @@ def add_rule_to_tax(tax_id, company_id):
         transaction_id = str(uuid.uuid4())
 
     app.logger.info(f"{transaction_id}: got new transaction to create rule for tax")
+
+    arg_tax_rule_id = request.args.get("tax_rule_id", False)
+    if request.method == "PUT" and not arg_tax_rule_id:
+        return jsonify(
+            status="ERROR",
+            message="you have to submit the tax_rule_id for editing a tax rule",
+            request_id=transaction_id,
+            status_code=400
+        ), 400
 
     if "x-user-id" not in request.headers or "x-user-uuid" not in request.headers:
         app.logger.info(f"{transaction_id}: user id and user uuid header not present")
@@ -317,6 +399,8 @@ def add_rule_to_tax(tax_id, company_id):
             status_code=404
         ), 404
     tax = tax.first()
+
+    given_tax_rule = TaxRule.query.filter_by(tax_id=tax.id).filter_by(tax_rule_uuid=arg_tax_rule_id).first_or_404()
 
     post_data = request.json
 
@@ -361,14 +445,26 @@ def add_rule_to_tax(tax_id, company_id):
                 status_code=400
             ), 400
 
-        tax_rule = TaxRule(tax.id, post_data["value"], post_data["rule_name"], b2c)
-        db.session.add(tax_rule)
+        if request.method == "PUT":
+            given_tax_rule.value = post_data["value"]
+            given_tax_rule.tax_rule_name = post_data["rule_name"]
+            given_tax_rule.b2c_rule = b2c
+            db.session.add(given_tax_rule)
+
+            for country in given_tax_rule.countries:
+                db.session.delete(country)
+        else:
+            tax_rule = TaxRule(tax.id, post_data["value"], post_data["rule_name"], b2c)
+            db.session.add(tax_rule)
 
         for country in validated_countries:
             count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=b2c).filter(TaxRule.countries.any(country_id=country)).count()
             if count == 0:
                 trc = TaxRuleCountry(country)
-                tax_rule.countries.append(trc)
+                if request.method == "PUT":
+                    given_tax_rule.countries.append(trc)
+                else:
+                    tax_rule.countries.append(trc)
             else:
                 return jsonify(
                     status="ERROR",
@@ -387,13 +483,31 @@ def add_rule_to_tax(tax_id, company_id):
         ), 200
 
     else:
-        count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=b2c).filter(~TaxRule.countries.any()).count()
+        if request.method == "PUT":
+            count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=b2c).filter(TaxRule.tax_rule_uuid != arg_tax_rule_id).filter(~TaxRule.countries.any()).count()
+        else:
+            count = TaxRule.query.filter_by(tax_id=tax.id).filter_by(b2c_rule=b2c).filter(
+                ~TaxRule.countries.any()).count()
 
         if count == 0:
             app.logger.info(f"no other rule with b2c={b2c} for tax {tax.id} - going to save")
-            tax_rule = TaxRule(tax.id, post_data["value"], post_data["rule_name"], b2c)
-            db.session.add(tax_rule)
-            db.session.commit()
+
+            if request.method == "PUT":
+                given_tax_rule.value = post_data["value"]
+                given_tax_rule.tax_rule_name = post_data["rule_name"]
+                given_tax_rule.b2c_rule = b2c
+
+                db.session.add(given_tax_rule)
+
+                for country in given_tax_rule.countries:
+                    db.session.delete(country)
+
+                given_tax_rule.countries = []
+                db.session.commit()
+            else:
+                tax_rule = TaxRule(tax.id, post_data["value"], post_data["rule_name"], b2c)
+                db.session.add(tax_rule)
+                db.session.commit()
             return jsonify(
                 status="OK",
                 status_code=200,
@@ -454,6 +568,50 @@ def delete_tax(tax_id, company_id):
     )
 
 
+@pluto.route('/delete/taxgroup/<tax_id>/<tax_group_id>/<company_id>', methods=['DELETE'])
+def delete_tax_group(tax_id, tax_group_id, company_id):
+    transaction_id = request.headers.get("x-transactionid", "")
+    if not transaction_id:
+        app.logger.info("no transaction id header present")
+        transaction_id = str(uuid.uuid4())
+
+    app.logger.info(f"{transaction_id}: got new transaction to create tax")
+
+    if "x-user-id" not in request.headers or "x-user-uuid" not in request.headers:
+        app.logger.info(f"{transaction_id}: user id and user uuid header not present")
+        return jsonify(
+            status="ERROR",
+            message="please send your user as header",
+            request_id=transaction_id,
+            status_code=400
+        ), 400
+
+    user_id = request.headers.get("x-user-id")
+    user_uuid = request.headers.get("x-user-uuid")
+
+    validation = _validate_request(user_uuid, company_id, transaction_id)
+
+    app.logger.info(validation)
+    if validation:
+        return validation
+
+    tax = Tax.query.filter_by(tax_uuid=tax_id).filter_by(company_id=company_id).first_or_404()
+    tax_rule = TaxRule.query.filter_by(tax_id=tax.id).filter_by(tax_rule_uuid=tax_group_id).first_or_404()
+
+    for country in tax_rule.countries:
+        db.session.delete(country)
+
+    db.session.delete(tax_rule)
+    db.session.commit()
+
+    return jsonify(
+        status="OK",
+        message="successfully deleted the tax group and its groups",
+        status_code=200,
+        request_id=transaction_id
+    )
+
+
 @pluto.route("/create/<company_id>", methods=['POST'])
 def create_tax(company_id):
     transaction_id = request.headers.get("x-transactionid", "")
@@ -500,7 +658,8 @@ def create_tax(company_id):
             status="OK",
             status_code=200,
             message="succesfully created tax with uuid " + tax.tax_uuid,
-            request_id=transaction_id
+            request_id=transaction_id,
+            tax_id=tax.tax_uuid
         ), 200
 
     return jsonify(
